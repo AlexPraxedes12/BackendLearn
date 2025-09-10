@@ -8,6 +8,7 @@ from fastapi import (
     Request,
 )
 import os
+import logging
 from pathlib import Path
 
 # Ensure environment variables are loaded before using LLM utilities
@@ -22,10 +23,22 @@ except Exception:  # pragma: no cover - fallback when app is a stub
     assert spec.loader is not None
     spec.loader.exec_module(_config)
 
-print("=== DEBUG ENV VARS ===")
-print(f"REPLICATE_API_TOKEN: {os.getenv('REPLICATE_API_TOKEN')}")
-print(f"REPLICATE_API_KEY: {os.getenv('REPLICATE_API_KEY')}")
-print("======================")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("learnsynth")
+
+token = os.getenv("REPLICATE_API_TOKEN")
+key = os.getenv("REPLICATE_API_KEY")
+
+# Solo para DEBUG y siempre enmascarado
+if os.getenv("DEBUG_LOG_TOKENS") == "1":
+    def _mask(v: str, p=4, s=2):
+        return "(unset)" if not v else f"{v[:p]}…{v[-s:]}"
+    logger.debug("REPLICATE_API_TOKEN=%s", _mask(token))
+    logger.debug("REPLICATE_API_KEY=%s", _mask(key))
+
+# Info seguro: solo presencia (nunca valores)
+logger.info("REPLICATE_API_TOKEN is %s", "set" if token else "missing")
+logger.info("REPLICATE_API_KEY is %s", "set" if key else "missing")
 from fastapi.responses import FileResponse
 from app.middleware.normalize_json import normalize_json_middleware
 
@@ -38,8 +51,6 @@ except Exception:  # pragma: no cover - fallback for tests
             super().__init__(content=content, status_code=status_code)
 
 
-import os
-import logging
 import asyncio
 import json
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,8 +91,6 @@ except Exception:  # pragma: no cover - test stubs may omit
 from app.models import ReviewInput, ExportInput
 from services import llm_service
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 logger.info("FLASHCARD_TARGET=%s", os.getenv("FLASHCARD_TARGET"))
 logger.info("QUIZ_TARGET=%s", os.getenv("QUIZ_TARGET"))
 MAX_MEDIA_BYTES = int(
@@ -104,11 +113,18 @@ async def _normalize_json(request: Request, call_next):
     return await normalize_json_middleware(request, call_next)
 
 
+# Restrict CORS to known front-end origins
+ALLOWED_ORIGINS = [
+    "https://www.learnsynth.com",
+    "https://learnsynth.com",
+    "http://localhost:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # en prod, limitar a tu dominio
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -158,8 +174,15 @@ async def upload_content(file: UploadFile = File(...)):
         file.file.seek(0, os.SEEK_END)
         size = file.file.tell()
         file.file.seek(0)
+        logger.info(
+            "upload_content: name=%s content_type=%s size=%d",
+            file.filename,
+            file.content_type,
+            size,
+        )
         if size > MAX_MEDIA_BYTES:
-            raise HTTPException(status_code=400, detail="File too large")
+            limit_mb = MAX_MEDIA_BYTES // (1024 * 1024)
+            raise HTTPException(status_code=400, detail=f"File exceeds {limit_mb} MB limit")
         content_type = (file.content_type or "").lower()
         ext = os.path.splitext(file.filename or "")[1].lower()
 

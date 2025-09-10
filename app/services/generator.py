@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import UploadFile, File, HTTPException
 from io import BytesIO
 import fitz  # PyMuPDF
-from pdf2image import convert_from_bytes
+from pdf2image import convert_from_bytes, pdfinfo_from_bytes
 import pytesseract
 from openai import OpenAI
 
@@ -158,16 +158,29 @@ def transcribe_video(file):
         raise HTTPException(status_code=500, detail="Transcription failed")
 
 
-def extract_text_with_ocr(pdf_data: bytes) -> str:
-    """Extract text from a PDF using OCR in Spanish."""
-    pages = convert_from_bytes(pdf_data, dpi=300)
+def extract_text_with_ocr(pdf_data: bytes, max_pages: int = 100, dpi: int = 200) -> str:
+    """Extract text from a PDF using OCR in Spanish.
+
+    Processes the document page by page to reduce memory usage.  The DPI is
+    lowered for faster processing and a maximum number of pages can be set to
+    avoid huge workloads.
+    """
+    info = pdfinfo_from_bytes(pdf_data)
+    total_pages = info.get("Pages", 0)
+    pages = min(total_pages, max_pages)
     text = ""
-    for page in pages:
-        text += pytesseract.image_to_string(page, lang='spa')
+    for page_num in range(1, pages + 1):
+        logger.info("OCR page %s/%s", page_num, pages)
+        images = convert_from_bytes(
+            pdf_data, first_page=page_num, last_page=page_num, dpi=dpi
+        )
+        text += pytesseract.image_to_string(images[0], lang="spa")
+    if total_pages > max_pages:
+        logger.info("OCR truncated at %s pages (limit)", max_pages)
     return text
 
 
-def extract_text_from_pdf(pdf_data: bytes) -> str:
+def extract_text_from_pdf(pdf_data: bytes, max_pages: int = 100) -> str:
     """Try basic extraction, fall back to OCR if needed."""
     text = ""
     try:
@@ -176,12 +189,12 @@ def extract_text_from_pdf(pdf_data: bytes) -> str:
         doc.close()
     except Exception as e:
         logger.exception("Error reading PDF: %s", e)
-    print(f"Extracted text length: {len(text)}")
+    logger.info("Extracted text length: %s", len(text))
     if not text.strip():
         logger.info("PDF contains no extractable text, applying OCR")
         try:
-            text = extract_text_with_ocr(pdf_data)
-            print(f"OCR extracted text length: {len(text)}")
+            text = extract_text_with_ocr(pdf_data, max_pages=max_pages)
+            logger.info("OCR extracted text length: %s", len(text))
         except Exception as e:
             logger.exception("OCR extraction failed: %s", e)
             text = ""
